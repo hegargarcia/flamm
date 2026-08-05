@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title description">
+  <title id="title">Flamm app icon</title>
+  <desc id="description">Two curved planes meet at a bright throat, representing a bridge between endpoints.</desc>
+
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0c2230" />
+      <stop offset="1" stop-color="#07131c" />
+    </linearGradient>
+    <linearGradient id="surface" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f8fbfa" />
+      <stop offset="1" stop-color="#a8c9c8" />
+    </linearGradient>
+    <linearGradient id="throat" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff725e" />
+      <stop offset="1" stop-color="#ffad66" />
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="20" stdDeviation="24" flood-color="#000" flood-opacity=".34" />
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" rx="224" fill="url(#background)" />
+  <path d="M0 744C228 833 405 860 512 860s284-27 512-116v280H0Z" fill="#0f2b3b" opacity=".56" />
+
+  <g filter="url(#shadow)">
+    <path d="M180 238c90 0 181 28 245 76 42 31 71 68 87 106 16-38 45-75 87-106 64-48 155-76 245-76v100c-70 0-134 19-179 53-42 31-65 73-65 121H424c0-48-23-90-65-121-45-34-109-53-179-53Z" fill="url(#surface)" />
+    <path d="M180 786c90 0 181-28 245-76 42-31 71-68 87-106 16 38 45 75 87 106 64 48 155 76 245 76V686c-70 0-134-19-179-53-42-31-65-73-65-121H424c0 48-23 90-65 121-45 34-109 53-179 53Z" fill="url(#surface)" />
+    <rect x="422" y="474" width="180" height="76" rx="38" fill="url(#throat)" />
+  </g>
+</svg>

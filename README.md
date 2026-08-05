@@ -1,70 +1,105 @@
-# Flamm
+<p align="center">
+  <img src="./assets/banner.svg" alt="Flamm — fold space, forward ports" width="100%" />
+</p>
 
-**Fold space. Forward ports.**
+<h1 align="center">Flamm</h1>
+
+<p align="center">
+  Native SSH tunnels, one click from the macOS menu bar.
+</p>
+
+<p align="center">
+  <a href="https://github.com/hegargarcia/flamm/releases/latest">Download</a> ·
+  <a href="#setup">Setup</a> ·
+  <a href="./development.md">Development</a>
+</p>
 
 Flamm is a native macOS menu-bar app for managing local SSH port forwards. It
-uses the hosts you already have in `~/.ssh/config`, keeps each forward visible,
-and shows whether its local endpoint is healthy before you need it.
+uses the hosts already defined in `~/.ssh/config`, keeps each forward visible,
+and tells you whether its local endpoint is ready before you need it.
 
-The name comes from Flamm's paraboloid: the two-sheeted spatial geometry used to
-visualize the throat of an Einstein–Rosen bridge.
+```text
+localhost:5432  ──  Flamm  ──  SSH target  ──  127.0.0.1:5432
+```
 
-## Features
+The name comes from [Flamm's paraboloid](https://en.wikipedia.org/wiki/Flamm%27s_paraboloid),
+a visualization of curved space around a Schwarzschild black hole. The icon
+reduces that idea to two endpoints meeting at a narrow bridge.
 
-- Discover and switch between concrete host aliases from `~/.ssh/config`
-- Import a target's existing `LocalForward` entries on first launch
-- Start and stop all forwards together or control them individually
-- Add optional names while retaining standard `local:remote` port mappings
-- Enable, disable, add, edit, and remove forwards in a native settings window
-- Check local reachability continuously with per-port traffic-light status
-- Detect occupied local ports before starting and skip conflicting forwards
-- Use the system SSH client, config, keys, agent, proxy jumps, and host settings
+## What it does
+
+- Discovers concrete host aliases from `~/.ssh/config` and sorts them A–Z.
+- Imports a target's existing `LocalForward` entries on first launch.
+- Starts and stops every forward together, or controls ports individually.
+- Adds optional human-readable names while preserving standard `local:remote`
+  port mappings.
+- Enables, disables, adds, edits, and removes forwards in a native settings
+  window.
+- Checks local reachability and reports each port with a native status light.
+- Detects occupied local ports before connecting and leaves collisions alone.
+- Uses the system SSH client, config, keys, agent, proxy jumps, and host rules.
 
 | Light | Meaning |
 | --- | --- |
-| Green | The forward is active and accepts local TCP connections |
-| Yellow | Connecting, unreachable, or blocked by a local port collision |
-| Red | Stopped or failed |
-| Gray | Disabled |
+| Green | The forward is active and accepts local TCP connections. |
+| Yellow | The forward is connecting, unreachable, or blocked by a local collision. |
+| Red | The forward is stopped or failed. |
+| Gray | The forward is disabled. |
 
-## Requirements
+## Setup
 
-- macOS 13 Ventura or newer
-- Swift 5.9 or newer
-- An SSH target configured for non-interactive authentication
+Download the latest `.dmg` from
+[Releases](https://github.com/hegargarcia/flamm/releases/latest), open it, and
+drag **Flamm** to **Applications**.
 
-Flamm runs SSH in batch mode. Keys, certificates, and agent-backed credentials
-work normally; interactive password prompts do not.
+> [!NOTE]
+> The current build is ad-hoc signed and not notarized. On first launch,
+> Control-click **Flamm** in Applications and choose **Open**.
 
-## Build
+Flamm needs macOS 13 Ventura or newer and at least one concrete host alias in
+`~/.ssh/config`:
 
-```sh
-./Scripts/test.sh
-./Scripts/build-app.sh
-open build/Flamm.app
+```sshconfig
+Host database
+    HostName 10.0.0.42
+    User deploy
+    IdentityFile ~/.ssh/id_ed25519
 ```
 
-The build script produces an ad-hoc signed application bundle at
-`build/Flamm.app`.
+Open Flamm from the menu bar, choose **SSH Target**, configure forwards under
+**Settings**, then select **Start**. Flamm runs SSH in batch mode, so keys,
+certificates, and agent-backed credentials work normally; interactive password
+prompts do not.
 
-## How forwarding works
+## Port controls
+
+Each port row opens its own controls:
+
+- **Start** enables the port and installs its forward immediately.
+- **Stop** removes the live forward but keeps it enabled for the next global
+  start.
+- **Disable** removes it and excludes it from future global starts.
+
+Mappings use `local:remote` notation. When both values match, Flamm shows the
+port once. An optional name appears first so entries such as `Postgres — 5432`
+stay easy to scan.
+
+Before installing a forward, Flamm tries to bind its local port on
+`127.0.0.1`. If another process already owns it, Flamm skips that forward,
+shows a yellow light, and explains the collision in the port submenu.
+
+## How it works
 
 Flamm starts `/usr/bin/ssh` with the selected config alias and a private OpenSSH
-control socket. Configured forwards are cleared for that connection, then Flamm
-adds only the enabled, collision-free ports. Existing host names, users,
-identity files, `Match` rules, proxy jumps, and keep-alive settings continue to
-come from OpenSSH.
+control socket. It clears configured forwards for that connection, then adds
+only the enabled, collision-free ports. Host names, users, identity files,
+`Match` rules, proxy jumps, and keep-alive settings continue to come directly
+from OpenSSH.
 
-Starting a port enables it and installs its forward. Stopping it removes the
-live forward but keeps it enabled for the next global start. Disabling it also
-excludes it from future global starts.
+App preferences are stored locally with `UserDefaults`. Flamm does not store
+SSH credentials, modify `~/.ssh/config`, or send configuration anywhere.
 
-Flamm binds local forwards to `127.0.0.1`. It checks each local port before
-installation, leaves conflicts untouched, and explains the warning from that
-port's submenu.
+## Development
 
-## Privacy and credentials
-
-Flamm does not store SSH credentials or send configuration anywhere. Editable
-app settings are stored locally with `UserDefaults`; authentication remains the
-responsibility of the system SSH client.
+Build, test, install, and package Flamm from source using the
+[development guide](./development.md).
