@@ -28,8 +28,12 @@ window. Use its status item to open the menu and **Settings**.
 ./Scripts/test.sh
 ```
 
-The script runs focused self-tests for port models, reachability checks, and SSH
-config parsing, then verifies the full Swift package builds.
+The script runs focused self-tests for port models, reachability checks, SSH
+config parsing, and connection lifecycle races, then builds the full Swift
+package. Lifecycle tests use a fake transport; a local subprocess fixture checks
+control-command timeouts, pipe draining, forced shutdown, and release of a real
+loopback listener. Tests do not connect to configured SSH hosts and require only
+the command-line tools, without XCTest or full Xcode.
 
 ## Build the app
 

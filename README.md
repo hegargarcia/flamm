@@ -36,7 +36,10 @@ reduces that idea to two endpoints meeting at a narrow bridge.
 - Enables, disables, adds, edits, and removes forwards in a native settings
   window.
 - Checks local reachability and reports each port with a native status light.
-- Detects occupied local ports before connecting and leaves collisions alone.
+- Detects occupied local ports before connecting and retries them without
+  interrupting healthy forwards.
+- Automatically recovers dropped SSH sessions with bounded retry backoff.
+- Releases changed forwards before replacing them; unchanged mappings stay live.
 - Uses the system SSH client, config, keys, agent, proxy jumps, and host rules.
 
 | Light | Meaning |
@@ -86,15 +89,29 @@ stay easy to scan.
 
 Before installing a forward, Flamm tries to bind its local port on
 `127.0.0.1`. If another process already owns it, Flamm skips that forward,
-shows a yellow light, and explains the collision in the port submenu.
+shows a yellow light, and explains the collision in the port submenu. It retries
+that port automatically while leaving existing forwards connected.
+
+Flamm checks SSH liveness every five seconds and disconnects after two missed
+responses. Failed connections retry after about one second, then back off up to
+30 seconds with jitter. A restored network path brings a pending retry forward
+to about one second. Backoff resets after a connection has stayed up for at least
+30 seconds, so a flapping network does not cause a rapid reconnect loop.
+**Stop** cancels recovery, and individually stopped or disabled ports stay off
+during automatic reconnects.
+
+Saving settings updates only changed forwarding mappings, removing the old
+listeners before adding replacements. Renaming or reordering ports does not
+interrupt them. Changing the SSH target closes the old session and waits for it
+to exit before opening the new one.
 
 ## How it works
 
 Flamm starts `/usr/bin/ssh` with the selected config alias and a private OpenSSH
 control socket. It clears configured forwards for that connection, then adds
 only the enabled, collision-free ports. Host names, users, identity files,
-`Match` rules, proxy jumps, and keep-alive settings continue to come directly
-from OpenSSH.
+`Match` rules, and proxy jumps continue to come directly from OpenSSH. Flamm sets
+its own connection timeout and keep-alive intervals for prompt recovery.
 
 App preferences are stored locally with `UserDefaults`. Flamm does not store
 SSH credentials, modify `~/.ssh/config`, or send configuration anywhere.

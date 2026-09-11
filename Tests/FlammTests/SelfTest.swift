@@ -48,18 +48,53 @@ struct SelfTest {
         close(occupiedPort.socketDescriptor)
         precondition(LocalPortAvailability.isAvailable(port: occupiedPort.port))
 
+        let wildcardListener = makeOccupiedLoopbackPort(host: "0.0.0.0")
+        precondition(!LocalPortAvailability.isAvailable(port: wildcardListener.port))
+        close(wildcardListener.socketDescriptor)
+
+        checkReleasedListenerWithEstablishedClient()
+
         print("Flamm self-tests passed")
     }
 
-    private static func makeOccupiedLoopbackPort() -> (socketDescriptor: Int32, port: Int) {
+    private static func checkReleasedListenerWithEstablishedClient() {
+        let listener = makeOccupiedLoopbackPort()
+        let client = socket(AF_INET, SOCK_STREAM, 0)
+        precondition(client >= 0)
+        defer { close(client) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = UInt16(listener.port).bigEndian
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        let result = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(client, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        precondition(result == 0)
+        let accepted = accept(listener.socketDescriptor, nil, nil)
+        precondition(accepted >= 0)
+        defer { close(accepted) }
+        precondition(!LocalPortAvailability.isAvailable(port: listener.port))
+        close(listener.socketDescriptor)
+        precondition(LocalPortAvailability.isAvailable(port: listener.port))
+    }
+
+    private static func makeOccupiedLoopbackPort(host: String = "127.0.0.1") -> (socketDescriptor: Int32, port: Int) {
         let socketDescriptor = socket(AF_INET, SOCK_STREAM, 0)
         precondition(socketDescriptor >= 0)
+        var reuseAddress: Int32 = 1
+        precondition(setsockopt(
+            socketDescriptor, SOL_SOCKET, SO_REUSEADDR,
+            &reuseAddress, socklen_t(MemoryLayout<Int32>.size)
+        ) == 0)
 
         var address = sockaddr_in()
         address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         address.sin_family = sa_family_t(AF_INET)
         address.sin_port = 0
-        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        address.sin_addr = in_addr(s_addr: inet_addr(host))
 
         let bindResult = withUnsafePointer(to: &address) { addressPointer in
             addressPointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
