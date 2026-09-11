@@ -41,6 +41,7 @@ reduces that idea to two endpoints meeting at a narrow bridge.
 - Automatically recovers dropped SSH sessions with bounded retry backoff.
 - Releases changed forwards before replacing them; unchanged mappings stay live.
 - Uses the system SSH client, config, keys, agent, proxy jumps, and host rules.
+- Checks for updates from GitHub when you choose **Check for Updates…**.
 
 | Light | Meaning |
 | --- | --- |
@@ -73,6 +74,19 @@ Open Flamm from the menu bar, choose **SSH Target**, configure forwards under
 **Settings**, then select **Start**. Flamm runs SSH in batch mode, so keys,
 certificates, and agent-backed credentials work normally; interactive password
 prompts do not.
+
+## Updates
+
+Choose **Check for Updates…** just above **Quit** in the menu. Flamm checks the
+latest stable GitHub release only when you click; there are no scheduled checks
+or background downloads. If a newer version is available, choose **Install and
+Restart** to download its DMG, verify it, and replace the app in its current
+location. SSH tunnels briefly disconnect during restart, and your saved settings
+are preserved. If the connection was enabled, Flamm reconnects on launch.
+
+Updates require a writable app and containing folder. If you are running from
+the DMG or a protected location, move Flamm to `~/Applications` and reopen it
+first. Errors include a link to download the release manually.
 
 ## Port controls
 
