@@ -8,17 +8,32 @@ enum LocalPortAvailability {
             return false
         }
 
+        // On macOS a reusable loopback bind can shadow an existing wildcard listener.
+        // Check both addresses so reuse never hides a live all-interface service.
+        return canBind(port: port, address: inet_addr("127.0.0.1"))
+            && canBind(port: port, address: INADDR_ANY)
+    }
+
+    private static func canBind(port: Int, address hostAddress: in_addr_t) -> Bool {
         let socketDescriptor = socket(AF_INET, SOCK_STREAM, 0)
         guard socketDescriptor >= 0 else {
             return false
         }
         defer { close(socketDescriptor) }
 
+        // Match SSH's listener reuse: closed listeners may still have established
+        // channels or TIME_WAIT sockets. A live listener must still block this bind.
+        var reuseAddress: Int32 = 1
+        guard setsockopt(
+            socketDescriptor, SOL_SOCKET, SO_REUSEADDR,
+            &reuseAddress, socklen_t(MemoryLayout<Int32>.size)
+        ) == 0 else { return false }
+
         var address = sockaddr_in()
         address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         address.sin_family = sa_family_t(AF_INET)
         address.sin_port = in_port_t(UInt16(port).bigEndian)
-        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        address.sin_addr = in_addr(s_addr: hostAddress)
 
         let result = withUnsafePointer(to: &address) { addressPointer in
             addressPointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in

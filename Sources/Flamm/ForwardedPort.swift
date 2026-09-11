@@ -24,6 +24,10 @@ struct ForwardedPort: Codable, Equatable, Identifiable {
         self.isEnabled = isEnabled
     }
 
+    func hasSameForward(as other: ForwardedPort) -> Bool {
+        localPort == other.localPort && remoteHost == other.remoteHost && remotePort == other.remotePort
+    }
+
     var name: String? {
         let trimmedAlias = alias.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedAlias.isEmpty ? nil : trimmedAlias

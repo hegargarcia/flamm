@@ -8,11 +8,14 @@ struct MenuContentView: View {
         Button(action: model.toggleConnection) {
             Label(model.connectionLabel, systemImage: model.connectionSymbol)
         }
-        .disabled(model.connectionState == .connecting)
 
         if let connectionError = model.connectionError {
             Label(connectionError, systemImage: "exclamationmark.triangle.fill")
             Button("Stop", systemImage: "stop.fill", action: model.disableConnection)
+        }
+
+        if let delay = model.retryDelay {
+            Text("Automatic retry in up to \(Int(ceil(delay)))s")
         }
 
         Section("Ports") {
@@ -88,7 +91,10 @@ struct MenuContentView: View {
         Divider()
 
         Button("Quit", systemImage: "xmark") {
-            NSApp.terminate(nil)
+            Task { @MainActor in
+                await model.shutdown()
+                NSApp.terminate(nil)
+            }
         }
         .keyboardShortcut("q")
     }

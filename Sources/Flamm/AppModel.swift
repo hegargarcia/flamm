@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Network
 
 @MainActor
 final class AppModel: NSObject, ObservableObject {
@@ -20,7 +21,22 @@ final class AppModel: NSObject, ObservableObject {
 
     private let defaults: UserDefaults
     private let sshConfig: SSHConfig
-    private let tunnel = SSHTunnel()
+    private let tunnel: any TunnelTransport
+    private var lifecycleTask: Task<Void, Never>?
+    private var retryTask: Task<Void, Never>?
+    private var installedPorts = [UUID: ForwardedPort]()
+    private var stoppedPortIDs = Set<UUID>()
+    private var sessionTarget: String?
+    private var retryAttempt = 0
+    private var connectedSince: Date?
+    private var forceReconnect = false
+    private var isShuttingDown = false
+    private var pathMonitor: NWPathMonitor?
+    private var networkWasUnavailable = false
+    @Published private(set) var retryDelay: TimeInterval?
+    private let retryInterval: (Int) -> TimeInterval
+    private let isPortAvailable: (Int) -> Bool
+    private let monitorConnection: Bool
     private var reachabilityTimer: Timer?
     private var settingsWindowController: PortSettingsWindowController?
     private var connectionGeneration = 0
@@ -28,7 +44,20 @@ final class AppModel: NSObject, ObservableObject {
     private static let settingsKey = "appSettings"
     private static let legacyDefaultsSuiteName = "dev.hegar.ft"
 
-    init(defaults: UserDefaults = .standard, sshConfig: SSHConfig = SSHConfig()) {
+    init(
+        defaults: UserDefaults = .standard,
+        sshConfig: SSHConfig = SSHConfig(),
+        tunnel: (any TunnelTransport)? = nil,
+        monitorConnection: Bool = true,
+        isPortAvailable: @escaping (Int) -> Bool = LocalPortAvailability.isAvailable,
+        retryInterval: @escaping (Int) -> TimeInterval = { attempt in
+            min(30, pow(2, Double(min(attempt, 5))) * Double.random(in: 0.8...1.2))
+        }
+    ) {
+        self.tunnel = tunnel ?? SSHTunnel()
+        self.retryInterval = retryInterval
+        self.isPortAvailable = isPortAvailable
+        self.monitorConnection = monitorConnection
         self.defaults = defaults
         self.sshConfig = sshConfig
 
@@ -79,22 +108,26 @@ final class AppModel: NSObject, ObservableObject {
             object: nil
         )
 
-        reachabilityTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                await self?.checkReachability()
+        if monitorConnection {
+            reachabilityTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+                Task { @MainActor in await self?.checkReachability() }
             }
-        }
-
-        if settings.isProxyEnabled {
-            Task { @MainActor [weak self] in
-                self?.start()
+            let monitor = NWPathMonitor()
+            monitor.pathUpdateHandler = { [weak self] path in
+                Task { @MainActor in self?.networkChanged(available: path.status == .satisfied) }
             }
+            monitor.start(queue: DispatchQueue(label: "dev.hegar.flamm.network"))
+            pathMonitor = monitor
+            if settings.isProxyEnabled { reconcileSoon() }
         }
     }
 
     deinit {
         NotificationCenter.default.removeObserver(self)
         reachabilityTimer?.invalidate()
+        pathMonitor?.cancel()
+        lifecycleTask?.cancel()
+        retryTask?.cancel()
     }
 
     var enabledPorts: [ForwardedPort] {
@@ -119,7 +152,7 @@ final class AppModel: NSObject, ObservableObject {
         case .stopped:
             return "Start"
         case .connecting:
-            return "Connecting…"
+            return "Stop Connecting"
         case .connected:
             return "Stop"
         case .failed:
@@ -132,7 +165,7 @@ final class AppModel: NSObject, ObservableObject {
         case .stopped, .failed:
             return "play.fill"
         case .connecting:
-            return "ellipsis"
+            return "stop.fill"
         case .connected:
             return "stop.fill"
         }
@@ -207,13 +240,20 @@ final class AppModel: NSObject, ObservableObject {
 
         settings.target = target
         persist()
-        restartIfNeeded()
+        reconcileSoon()
     }
 
     func replacePorts(_ ports: [ForwardedPort]) {
+        guard settings.ports != ports else { return }
+        let previous = settings.ports
         settings.ports = ports
+        stoppedPortIDs.formIntersection(ports.filter(\.isEnabled).map(\.id))
         persist()
-        restartIfNeeded()
+        // Names and order do not affect an SSH forwarding rule.
+        let changed = previous.count != ports.count || ports.contains { port in
+            !previous.contains { $0.id == port.id && $0.hasSameForward(as: port) && $0.isEnabled == port.isEnabled }
+        }
+        if changed { reconcileSoon() }
     }
 
     func showPortSettings() {
@@ -225,225 +265,255 @@ final class AppModel: NSObject, ObservableObject {
     }
 
     func startPort(_ portID: UUID) {
-        guard let index = settings.ports.firstIndex(where: { $0.id == portID }) else {
-            return
-        }
-
-        var candidatePorts = settings.ports
-        candidatePorts[index].isEnabled = true
-        if let message = PortValidation.message(for: candidatePorts) {
+        guard let index = settings.ports.firstIndex(where: { $0.id == portID }) else { return }
+        var ports = settings.ports
+        ports[index].isEnabled = true
+        if let message = PortValidation.message(for: ports) {
             portErrors[portID] = message
             return
         }
-
-        settings.ports[index].isEnabled = true
-        let port = settings.ports[index]
+        // Starting one port while stopped should not start every other enabled port.
+        if !settings.isProxyEnabled {
+            stoppedPortIDs = Set(enabledPorts.map(\.id))
+        }
+        stoppedPortIDs.remove(portID)
+        settings.ports = ports
+        settings.isProxyEnabled = true
         portErrors[portID] = nil
         portWarnings[portID] = nil
         persist()
-
-        guard !activePortIDs.contains(portID) else {
-            return
-        }
-
-        switch connectionState {
-        case .connected:
-            guard LocalPortAvailability.isAvailable(port: port.localPort) else {
-                portWarnings[portID] = collisionMessage(for: port)
-                return
-            }
-
-            Task { @MainActor [weak self] in
-                guard let self else {
-                    return
-                }
-
-                switch await self.tunnel.installForward(port) {
-                case .success:
-                    self.activePortIDs.insert(portID)
-                    await self.checkReachability()
-                case let .failure(message):
-                    self.portErrors[portID] = message
-                }
-            }
-        case .stopped, .failed:
-            settings.isProxyEnabled = true
-            persist()
-            start([port])
-        case .connecting:
-            break
-        }
+        reconcileSoon()
     }
 
     func stopPort(_ portID: UUID) {
-        guard
-            activePortIDs.contains(portID),
-            let port = settings.ports.first(where: { $0.id == portID })
-        else {
-            return
-        }
-
-        Task { @MainActor [weak self] in
-            guard let self else {
-                return
-            }
-
-            switch self.tunnel.cancelForward(port) {
-            case .success:
-                self.finishPortStop(portID)
-            case let .failure(message):
-                self.portErrors[portID] = message
-            }
-        }
+        stoppedPortIDs.insert(portID)
+        stopIfNoPortsDesired()
+        reconcileSoon()
     }
 
     func disablePort(_ portID: UUID) {
-        guard let index = settings.ports.firstIndex(where: { $0.id == portID }) else {
-            return
-        }
-
+        guard let index = settings.ports.firstIndex(where: { $0.id == portID }) else { return }
         settings.ports[index].isEnabled = false
-        let port = settings.ports[index]
+        stoppedPortIDs.remove(portID)
         portErrors[portID] = nil
         portWarnings[portID] = nil
+        stopIfNoPortsDesired()
         persist()
-
-        guard activePortIDs.contains(portID) else {
-            return
-        }
-
-        Task { @MainActor [weak self] in
-            guard let self else {
-                return
-            }
-
-            switch self.tunnel.cancelForward(port) {
-            case .success:
-                self.finishPortStop(portID)
-            case let .failure(message):
-                if let index = self.settings.ports.firstIndex(where: { $0.id == portID }) {
-                    self.settings.ports[index].isEnabled = true
-                    self.persist()
-                }
-                self.portErrors[portID] = message
-            }
-        }
+        reconcileSoon()
     }
 
     func disableConnection() {
-        connectionGeneration += 1
-        tunnel.stop()
         settings.isProxyEnabled = false
+        retryAttempt = 0
         connectionState = .stopped
-        activePortIDs = []
-        reachablePorts = []
         portErrors = [:]
         portWarnings = [:]
         persist()
+        reconcileSoon()
     }
 
     private func enable() {
+        if !settings.isProxyEnabled { stoppedPortIDs = [] }
         settings.isProxyEnabled = true
         persist()
-        start()
+        reconcileSoon()
     }
 
-    private func restartIfNeeded() {
-        guard settings.isProxyEnabled else {
-            return
-        }
+    private var desiredPorts: [ForwardedPort] {
+        enabledPorts.filter { !stoppedPortIDs.contains($0.id) }
+    }
 
-        guard !enabledPorts.isEmpty else {
-            disableConnection()
-            return
+    private func stopIfNoPortsDesired() {
+        if desiredPorts.isEmpty {
+            settings.isProxyEnabled = false
+            connectionState = .stopped
+            persist()
         }
+    }
 
+    // Every operation waits for its predecessor, including cancelled work. An in-flight
+    // install must finish before a later edit/stop can release its forwarding rule.
+    private func reconcileSoon() {
+        guard !isShuttingDown else { return }
+        retryTask?.cancel()
+        retryTask = nil
+        retryDelay = nil
+        lifecycleTask?.cancel()
+        let previous = lifecycleTask
+        lifecycleTask = Task { @MainActor [weak self] in
+            await previous?.value
+            guard !Task.isCancelled, let self else { return }
+            await self.reconcile()
+        }
+    }
+
+    private func closeSession() async {
         connectionGeneration += 1
-        tunnel.stop()
-        start()
+        resetBackoffAfterStableConnection()
+        await tunnel.stop()
+        sessionTarget = nil
+        installedPorts = [:]
+        activePortIDs = []
+        reachablePorts = []
+        connectedSince = nil
     }
 
-    private func start(_ requestedPorts: [ForwardedPort]? = nil) {
-        let requestedPorts = requestedPorts ?? enabledPorts
-        guard
-            !settings.target.isEmpty,
-            !requestedPorts.isEmpty,
-            PortValidation.message(for: settings.ports) == nil
-        else {
+    private func reconcile() async {
+        if forceReconnect || sessionTarget != settings.target || !tunnel.isRunning
+            || !settings.isProxyEnabled || desiredPorts.isEmpty {
+            forceReconnect = false
+            await closeSession()
+        }
+        guard !Task.isCancelled else { return }
+        guard settings.isProxyEnabled, !desiredPorts.isEmpty else {
+            stopIfNoPortsDesired()
+            connectionState = .stopped
+            return
+        }
+        guard !settings.target.isEmpty, PortValidation.message(for: settings.ports) == nil else {
+            await closeSession()
             connectionState = .failed("Choose an SSH target and at least one valid port.")
             return
         }
 
-        connectionGeneration += 1
-        let generation = connectionGeneration
-        connectionState = .connecting
-        activePortIDs = []
-        reachablePorts = []
-        portErrors = [:]
-        for port in requestedPorts {
-            portWarnings[port.id] = nil
-        }
-
-        let ports = requestedPorts.filter { port in
-            if LocalPortAvailability.isAvailable(port: port.localPort) {
-                return true
-            }
-
-            portWarnings[port.id] = collisionMessage(for: port)
-            return false
-        }
-
-        guard !ports.isEmpty else {
-            settings.isProxyEnabled = false
-            connectionState = .stopped
-            persist()
-            return
-        }
-
-        do {
-            try tunnel.start(target: settings.target) { [weak self] status, errorOutput in
-                guard let self, generation == self.connectionGeneration else {
-                    return
-                }
-
-                let message = errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-                self.connectionState = .failed(
-                    message.isEmpty ? "SSH exited with status \(status)." : message
-                )
-                self.activePortIDs = []
-                self.reachablePorts = []
-            }
-        } catch {
-            connectionState = .failed(error.localizedDescription)
-            return
-        }
-
-        Task { @MainActor [weak self] in
-            guard let self else {
-                return
-            }
-
-            let result = await self.tunnel.installForwards(ports)
-            guard generation == self.connectionGeneration else {
-                return
-            }
-
+        // Remove all changed mappings first, including port swaps, before installing any.
+        for port in Array(installedPorts.values) {
+            guard !Task.isCancelled else { return }
+            if desiredPorts.contains(where: { $0.id == port.id && $0.hasSameForward(as: port) }) { continue }
+            let result = await tunnel.cancelForward(port)
             switch result {
             case .success:
-                self.activePortIDs = Set(ports.map(\.id))
-                self.connectionState = .connected
-                await self.checkReachability()
-            case let .failure(message):
-                self.tunnel.stop()
-                self.connectionState = .failed(message)
-                self.activePortIDs = []
-                self.reachablePorts = []
+                installedPorts[port.id] = nil
+                activePortIDs.remove(port.id)
+                reachablePorts.remove(port.id)
+            case .cancelled:
+                return
+            case let .failure(message), let .uncertain(message):
+                // A failed cancel leaves ownership uncertain. Reap the master before retrying.
+                await connectionFailed(message)
+                return
             }
+        }
+        guard !Task.isCancelled else { return }
+        if sessionTarget == nil {
+            connectionState = .connecting
+            let generation = connectionGeneration
+            do {
+                try tunnel.start(target: settings.target) { [weak self] status, output in
+                    guard let self, !self.isShuttingDown, generation == self.connectionGeneration else { return }
+                    self.connectionState = .failed(output.isEmpty ? "SSH exited with status \(status)." : output)
+                    self.activePortIDs = []
+                    self.reachablePorts = []
+                    self.forceReconnect = true
+                    self.lifecycleTask?.cancel()
+                    self.resetBackoffAfterStableConnection()
+                    self.scheduleRetry()
+                }
+                sessionTarget = settings.target
+            } catch {
+                await connectionFailed(error.localizedDescription)
+                return
+            }
+        }
+        for port in desiredPorts {
+            guard !Task.isCancelled else { return }
+            if installedPorts[port.id] != nil { continue }
+            portErrors[port.id] = nil
+            portWarnings[port.id] = nil
+            guard isPortAvailable(port.localPort) else {
+                portWarnings[port.id] = collisionMessage(for: port)
+                continue
+            }
+            switch await tunnel.installForward(port) {
+            case .success:
+                installedPorts[port.id] = port
+                // A newer reconciliation removes obsolete installs before doing anything else.
+                if !Task.isCancelled { activePortIDs.insert(port.id) }
+            case .cancelled:
+                return
+            case let .failure(message):
+                guard !Task.isCancelled else { return }
+                guard tunnel.isRunning else {
+                    await connectionFailed(message)
+                    return
+                }
+                portErrors[port.id] = message
+            case let .uncertain(message):
+                // Even a timed-out request may have reached the master; close it to release
+                // any forwarding whose result could not be confirmed.
+                await connectionFailed(message)
+                return
+            }
+        }
+        guard !Task.isCancelled else { return }
+        activePortIDs = Set(installedPorts.keys)
+        if installedPorts.isEmpty {
+            await closeSession()
+            connectionState = .failed(portErrors.values.first ?? "No requested local ports are available.")
+            scheduleRetry()
+            return
+        }
+        connectionState = .connected
+        if connectedSince == nil { connectedSince = Date() }
+        // Retry occupied ports without interrupting the healthy forwards.
+        if installedPorts.count < desiredPorts.count { scheduleRetry() }
+        await checkReachability()
+    }
+
+    private func connectionFailed(_ message: String) async {
+        await closeSession()
+        guard !Task.isCancelled else { return }
+        connectionState = .failed(message)
+        scheduleRetry()
+    }
+
+    private func resetBackoffAfterStableConnection() {
+        if let connectedSince, Date().timeIntervalSince(connectedSince) >= 30 { retryAttempt = 0 }
+        connectedSince = nil
+    }
+
+    private func scheduleRetry(after interval: TimeInterval? = nil) {
+        guard !isShuttingDown, settings.isProxyEnabled, !desiredPorts.isEmpty, retryTask == nil else { return }
+        let delay = interval ?? retryInterval(retryAttempt)
+        retryAttempt = min(retryAttempt + 1, 6)
+        retryDelay = delay
+        retryTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+            catch { return }
+            guard let self, !Task.isCancelled else { return }
+            self.reconcileSoon()
         }
     }
 
+    func networkChanged(available: Bool) {
+        let recovered = available && networkWasUnavailable
+        networkWasUnavailable = !available
+        guard recovered, !isShuttingDown, settings.isProxyEnabled else { return }
+        // Give the route a moment to settle, coalescing repeated path notifications.
+        forceReconnect = true
+        if let retryDelay, retryDelay <= 1 { return }
+        retryTask?.cancel()
+        retryTask = nil
+        scheduleRetry(after: 1)
+    }
+
+    func shutdown() async {
+        isShuttingDown = true
+        retryTask?.cancel()
+        retryTask = nil
+        retryDelay = nil
+        lifecycleTask?.cancel()
+        await lifecycleTask?.value
+        await closeSession()
+    }
+
+    // Allows focused lifecycle tests to wait for all currently requested work.
+    func waitForPendingChanges() async {
+        await lifecycleTask?.value
+    }
+
     private func checkReachability() async {
-        guard connectionState == .connected else {
+        guard monitorConnection, connectionState == .connected else {
             return
         }
 
@@ -471,23 +541,6 @@ final class AppModel: NSObject, ObservableObject {
         })
     }
 
-    private func finishPortStop(_ portID: UUID) {
-        activePortIDs.remove(portID)
-        reachablePorts.remove(portID)
-        portErrors[portID] = nil
-        portWarnings[portID] = nil
-
-        guard activePortIDs.isEmpty else {
-            return
-        }
-
-        connectionGeneration += 1
-        tunnel.stop()
-        settings.isProxyEnabled = false
-        connectionState = .stopped
-        persist()
-    }
-
     private func persist() {
         guard let data = try? JSONEncoder().encode(settings) else {
             return
@@ -500,6 +553,8 @@ final class AppModel: NSObject, ObservableObject {
     }
 
     @objc private func applicationWillTerminate() {
-        tunnel.stop()
+        lifecycleTask?.cancel()
+        retryTask?.cancel()
+        tunnel.terminate()
     }
 }
