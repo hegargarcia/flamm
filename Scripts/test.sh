@@ -28,4 +28,9 @@ swiftc "${lifecycle_sources[@]}" \
   -o "$test_dir/flamm-lifecycle-test"
 "$test_dir/flamm-lifecycle-test"
 
+swiftc "$project_dir/Sources/Flamm/AppUpdate.swift" \
+  "$project_dir/Tests/FlammTests/UpdateTests.swift" \
+  -o "$test_dir/flamm-update-test"
+"$test_dir/flamm-update-test"
+
 swift build --package-path "$project_dir"

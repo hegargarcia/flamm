@@ -3,6 +3,7 @@ import SwiftUI
 
 struct MenuContentView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var updater: UpdateController
 
     var body: some View {
         Button(action: model.toggleConnection) {
@@ -90,6 +91,11 @@ struct MenuContentView: View {
 
         Divider()
 
+        Button(updater.menuTitle, systemImage: "arrow.down.circle") {
+            updater.checkForUpdates(model: model)
+        }
+        .disabled(updater.isBusy)
+
         Button("Quit", systemImage: "xmark") {
             Task { @MainActor in
                 await model.shutdown()
@@ -97,6 +103,7 @@ struct MenuContentView: View {
             }
         }
         .keyboardShortcut("q")
+        .disabled(updater.isBusy)
     }
 }
 
